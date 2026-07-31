@@ -44,7 +44,7 @@ flowchart LR
     A2 --> H
     B2 --> H
     H --> D --> P --> R
-    R -->|NextToken = base64(lastKey)| Client
+    R -->|NextToken = base64 lastKey| Client
 ```
 
 ## 流式 Heap Merge 詳細流程
