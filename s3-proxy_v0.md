@@ -1,7 +1,5 @@
 # S3 Abstraction Layer — Design & Implementation Spec
 
-*Extends: Research / S3 Abstraction Layer (David Su, 2026-07-26). This document keeps the original framing but corrects Method 2 and re-scopes the estimate.*
-
 ---
 
 ## 0. Recommendations (decisions requested)
