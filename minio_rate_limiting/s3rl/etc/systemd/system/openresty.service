@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenResty S3 Rate-Limiting Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/openresty.pid
+ExecStartPre=/usr/local/openresty/bin/openresty -t -q -g 'daemon on; master_process on;'
+ExecStart=/usr/local/openresty/bin/openresty -g 'daemon on; master_process on;'
+ExecReload=/usr/local/openresty/bin/openresty -t -q -g 'daemon on; master_process on;' && kill -HUP $MAINPID
+ExecStop=-/sbin/start-stop-daemon --quiet --stop --retry QUIT/5 --pidfile /var/run/openresty.pid
+LimitNOFILE=1048576
+LimitNPROC=65535
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

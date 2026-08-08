@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "enabled": true,
+  "reject_status": 503,
+  "retry_after": 1,
+
+  "_comment_ops": "list=ListObjectsV2/Versions/Parts, read=GetObject, write=Put/UploadPart/CompleteMPU, delete=DeleteObject(s), meta=Head+sub-resource, other=其餘",
+  "_comment_fields": "rps=每秒請求數, burst=leaky bucket 可排隊量, conn=同時在途上限, max_delay=最長排隊秒數(超過就回SlowDown), conn_est=每請求預估耗時, limit_rate=egress bytes/s, quota={count,window}, per_access_key=是否再依 AK 細分",
+
+  "defaults": {
+    "list":   { "rps": 50,   "burst": 100,  "conn": 32,   "max_delay": 0.5,  "conn_est": 0.30 },
+    "read":   { "rps": 3000, "burst": 6000, "conn": 2048, "max_delay": 0.2,  "conn_est": 0.05 },
+    "write":  { "rps": 800,  "burst": 1600, "conn": 1024, "max_delay": 0.2,  "conn_est": 0.10 },
+    "delete": { "rps": 300,  "burst": 600,  "conn": 256,  "max_delay": 0.2,  "conn_est": 0.05 },
+    "meta":   { "rps": 3000, "burst": 6000, "conn": 1024, "max_delay": 0.2,  "conn_est": 0.02 },
+    "other":  { "rps": 200,  "burst": 200,  "conn": 64,   "max_delay": 0.2,  "conn_est": 0.05 }
+  },
+
+  "prefix_rules": [
+    {
+      "prefix": "fab12-",
+      "_note": "產線即時資料，read/write 放寬，list 仍然要壓",
+      "read":  { "rps": 20000, "burst": 40000, "conn": 8192 },
+      "write": { "rps": 6000,  "burst": 12000, "conn": 4096 },
+      "list":  { "rps": 20,    "burst": 20,    "conn": 8 }
+    },
+    {
+      "prefix": "eda-scratch-",
+      "_note": "EDA 暫存區，允許暴衝但限總量",
+      "*":     { "conn": 512 },
+      "write": { "rps": 4000, "burst": 20000 },
+      "list":  { "rps": 10,   "burst": 10, "conn": 4 }
+    },
+    {
+      "prefix": "archive-",
+      "_note": "冷資料，egress 限速 200MB/s 避免吃掉線上頻寬",
+      "read":  { "rps": 200, "burst": 200, "conn": 64, "limit_rate": 209715200 }
+    }
+  ],
+
+  "buckets": {
+    "fab12-oven-raw": {
+      "read":   { "rps": 40000, "burst": 80000, "conn": 16384 },
+      "list":   { "rps": 5,     "burst": 5,     "conn": 2, "max_delay": 1.0 },
+      "delete": { "rps": 50,    "burst": 50,    "conn": 16 }
+    },
+    "wafer-map-index": {
+      "_note": "5B object 的 LOSF bucket，ListObjectsV2 必須嚴格限制",
+      "list":   { "rps": 2, "burst": 2, "conn": 1, "max_delay": 2.0, "per_access_key": true },
+      "read":   { "rps": 50000, "burst": 100000, "conn": 20000 },
+      "quota":  { "count": 500000000, "window": 86400 }
+    },
+    "yield-report": {
+      "*":      { "per_access_key": true },
+      "read":   { "rps": 500, "burst": 1000, "conn": 256 },
+      "write":  { "rps": 100, "burst": 200,  "conn": 64 }
+    },
+    "dr-replica-target": {
+      "enabled": false
+    }
+  },
+
+  "exempt_access_keys": [
+    "SVC-DR-REPLICATION",
+    "SVC-BACKUP-T0B"
+  ]
+}
