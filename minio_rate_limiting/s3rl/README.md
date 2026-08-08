@@ -5,6 +5,73 @@ S3 Client ──HTTPS──> OpenResty :443 ──HTTP──> HAProxy :9000 ─�
                      (bucket 限流層)          (LB + health)     (資料層)
 ```
 
+```mermaid
+flowchart TD
+    C["S3 Client<br/>AWS SDK / mc / warp"]
+ 
+    subgraph OR["OpenResty :443 — access_by_lua (s3rl)"]
+        direction TB
+        P["parser.lua<br/>bucket / op class / access key"]
+        L1["rate — leaky bucket<br/>resty.limit.req"]
+        L2["quota — fixed window<br/>resty.limit.count"]
+        L3["conn — in-flight cap<br/>resty.limit.conn"]
+        P --> L1 --> L2 --> L3
+    end
+ 
+    HA["HAProxy :9000<br/>leastconn + httpchk"]
+    M["MinIO cluster<br/>4 nodes"]
+    R["503 SlowDown<br/>Retry-After: 1"]
+ 
+    C -- HTTPS --> P
+    L3 -- "pass / delay" --> HA
+    HA --> M
+    L1 -. rejected .-> R
+    L2 -. rejected .-> R
+    L3 -. "rejected / delay_exceeded" .-> R
+    R -. "SDK 指數退避重試" .-> C
+ 
+    classDef edge  fill:#F1EFE8,stroke:#5F5E5A,color:#444441
+    classDef gate  fill:#FAEEDA,stroke:#BA7517,color:#633806
+    classDef parse fill:#E1F5EE,stroke:#0F6E56,color:#085041
+    classDef deny  fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
+    class C,HA,M edge
+    class P parse
+    class L1,L2,L3 gate
+    class R deny
+```
+ 
+## 請求生命週期
+ 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as S3 Client
+    participant A as access_by_lua
+    participant D as lua_shared_dict
+    participant U as HAProxy → MinIO
+    participant L as log_by_lua
+ 
+    C->>A: PUT /wafer-map-index/lot123/w01.gz
+    A->>A: parser: bucket=wafer-map-index, op=write
+    A->>A: config.policy() → LRU cache hit
+    A->>D: limit_req:incoming()
+    A->>D: limit_count:incoming()
+    A->>D: limit_conn:incoming()
+ 
+    alt 任一層 rejected
+        A->>D: uncommit() 前面已 commit 的層
+        A-->>C: 503 SlowDown + Retry-After
+    else delay ≤ max_delay
+        A->>A: ngx.sleep(delay)
+        A->>U: proxy_pass（保留 $request_uri）
+        U-->>C: 200 OK
+    end
+ 
+    Note over L,D: log phase 一定會執行
+    L->>D: limit_conn:leaving(key, request_time)
+```
+
+
 ## 檔案清單
 
 | 路徑 | 用途 |
