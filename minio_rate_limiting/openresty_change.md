@@ -2,6 +2,42 @@
 
 先確認流程方向:`S3 Client → OpenResty (限流層) → HAProxy → MinIO Cluster`。整套已經照真實絕對路徑做好目錄結構,`tar` 解開後直接 `rsync -av ./usr/ /usr/ && rsync -av ./etc/ /etc/` 即可。所有 Lua 檔已通過 LuaJIT 語法檢查。
 
+
+```mermaid
+flowchart TD
+    C["S3 Client<br/>AWS SDK / mc / warp"]
+
+    subgraph OR["OpenResty :443 &nbsp;—&nbsp; access_by_lua (s3rl)"]
+        direction TB
+        P["parser.lua<br/><small>bucket / op class / access key</small>"]
+        L1["rate&nbsp;— leaky bucket<br/><small>resty.limit.req</small>"]
+        L2["quota&nbsp;— fixed window<br/><small>resty.limit.count</small>"]
+        L3["conn&nbsp;— in-flight cap<br/><small>resty.limit.conn</small>"]
+        P --> L1 --> L2 --> L3
+    end
+
+    HA["HAProxy :9000<br/><small>leastconn + httpchk</small>"]
+    M["MinIO cluster<br/><small>4 nodes</small>"]
+    R["503 SlowDown<br/><small>Retry-After: 1</small>"]
+
+    C -- HTTPS --> P
+    L3 -- "pass / delay" --> HA
+    HA --> M
+    L1 -. rejected .-> R
+    L2 -. rejected .-> R
+    L3 -. "rejected / delay_exceeded" .-> R
+    R -. "SDK 指數退避重試" .-> C
+
+    classDef edge  fill:#F1EFE8,stroke:#5F5E5A,color:#444441
+    classDef gate  fill:#FAEEDA,stroke:#BA7517,color:#633806
+    classDef parse fill:#E1F5EE,stroke:#0F6E56,color:#085041
+    classDef deny  fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
+    class C,HA,M edge
+    class P parse
+    class L1,L2,L3 gate
+    class R deny
+```
+
 ## 核心設計
 
 **限流維度是 `(bucket, operation class)`,不是 `(bucket)`**。S3 各類操作成本差三個數量級 —— `ListObjectsV2` 在你 5B object 的場景要掃 metadata,`GetObject` 只是一次 lookup。如果用單一 rps 綁整個 bucket,不是 list 打爆 metadata 層,就是為了保護 list 而把 read 也一起餓死。`parser.lua` 把請求分成 `list / read / write / delete / meta / other` 六類,各自獨立限。
