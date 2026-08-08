@@ -19,7 +19,7 @@ flowchart TD
     end
  
     HA["HAProxy :9000<br/>leastconn + httpchk"]
-    M["MinIO cluster<br/>4 nodes"]
+    M["MinIO cluster<br/>12 nodes"]
     R["503 SlowDown<br/>Retry-After: 1"]
  
     C -- HTTPS --> P
