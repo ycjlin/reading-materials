@@ -1,0 +1,170 @@
+problem: Openresty 被包在k8s pod 裡面，我們可以從外面下指令改變裡面的狀態，進而以事件觸發openresty 有所動作嗎？
+我不想重啟。我想用Mango DB來存config Map, 當D B的內容有所更動的時候，我想要事件觸發Openresty從D B裡面讀取最新的值，更新他的config map，不需要restart 重啟服務
+Config map is json; sidecar 用javascript實作
+
+可以，而且這就是 OpenResty 在 k8s 裡的標準做法。核心觀念是：
+
+**不要去改 `nginx.conf` 或 k8s ConfigMap，那個一定要 reload。把你的 json config 放到 `lua_shared_dict` 裡。** `shared_dict` 是所有 worker 共享的記憶體，改了立刻生效，完全不用 restart。
+
+你要的事件鏈是這樣：
+
+`MongoDB 更新 -> Change Stream 觸發 -> 呼叫 OpenResty 內部 API -> OpenResty 自己去 MongoDB 抓最新 json -> 寫入 shared_dict`
+
+### 推薦架構：Sidecar Watcher + 內部 Admin API
+
+這是最乾淨、真正的 event-driven，不用 polling。
+
+同一個 Pod 裡跑兩個 container:
+
+1.  `openresty`
+2.  `config-watcher` (很小的 python/go)
+
+它們用 `localhost` 互通，外面完全不用 `kubectl exec`。
+
+#### 1. OpenResty 端
+
+`nginx.conf`
+
+```nginx
+lua_shared_dict my_config 10m;
+
+init_by_lua_block {
+    -- pod 啟動時先載一次
+    local loader = require "config_loader"
+    loader.load_from_mongo() -- 或從你包的 config-api 載
+}
+
+server {
+    listen 80;
+    # 你的正常業務
+    location / {
+        access_by_lua_block {
+            local dict = ngx.shared.my_config
+            local json_str = dict:get("gateway_config")
+            -- json_decode 後做路由、限流判斷...
+        }
+        proxy_pass http://upstream;
+    }
+}
+
+# 內部專用 server，不對外
+server {
+    listen 127.0.0.1:9111;
+
+    location /_internal/reload {
+        # 只允許 sidecar
+        allow 127.0.0.1;
+        deny all;
+
+        content_by_lua_block {
+            local loader = require "config_loader"
+            local ok, err = loader.load_from_mongo()
+            if not ok then
+                ngx.status = 500
+                ngx.say(err)
+                return
+            end
+            ngx.say("ok, version: " .. loader.get_version())
+        }
+    }
+}
+```
+
+`config_loader.lua` 重點是原子更新：
+
+```lua
+local cjson = require "cjson"
+local dict = ngx.shared.my_config
+
+function _M.load_from_mongo()
+    -- 建議：不要讓 OpenResty 直連 mongo driver，很重
+    -- 讓它用 resty.http 去呼叫一個小小的 config-api
+    -- GET http://config-api-service/get-config
+    local http = require "resty.http".new()
+    local res, err = http:request_uri("http://config-api.internal/get-config")
+    if not res then return nil, err end
+    
+    local new_cfg = cjson.decode(res.body) -- { version=..., data={...} }
+    dict:set("gateway_config", cjson.encode(new_cfg.data))
+    dict:set("config_version", new_cfg.version)
+    return true
+end
+```
+
+#### 2. config-watcher sidecar 端
+
+這才是監聽 MongoDB 的人，MongoDB 的 Change Stream 一定要 ReplicaSet 才能用。
+
+`watcher.py`
+
+```python
+import pymongo, requests, time
+client = pymongo.MongoClient("mongodb://.../?replicaSet=rs0")
+coll = client.mydb.configs
+
+# 只監聽你那個 id 的變動
+pipeline = [{'$match': {'fullDocument._id': 'gateway-config'}}]
+
+with coll.watch(pipeline) as stream:
+    for change in stream:
+        print("DB changed, trigger openresty")
+        try:
+            # 兩種策略二選一：
+            # A. 只通知，內容讓 OpenResty 自己去抓 (推薦)
+            requests.post("http://127.0.0.1:9111/_internal/reload", timeout=2)
+            # B. 直接把新內容推過去，OpenResty 連 DB 都不用連
+            # new_data = change['fullDocument']['data']
+            # requests.post("http://127.0.0.1:9111/_internal/reload", json=new_data)
+        except Exception as e:
+            time.sleep(1)
+```
+
+這樣你從外面改 DB：
+
+```js
+db.configs.updateOne({_id: "gateway-config"}, {$set: {data: {...}, version: Date.now()}})
+```
+
+Watcher 0.5秒內就會打到 OpenResty，OpenResty 的記憶體就更新了。
+
+Pod 的 yaml 概念：
+
+```yaml
+containers:
+- name: openresty
+  ports:
+  - containerPort: 80
+  - containerPort: 9111
+- name: watcher
+  image: your-watcher:1.0
+```
+
+### 如果你不想加 sidecar，極簡版：OpenResty 自己輪詢
+
+在 `init_worker_by_lua` 加一個 timer，每 3 秒去問一次。不是純 event，但對 config 來說足夠即時，程式碼最少。
+
+```lua
+-- config_loader.lua
+function _M.start_timer()
+    local function check(premature)
+        _M.load_from_mongo()
+    end
+    ngx.timer.every(3, check) -- 每3秒
+end
+```
+
+缺點就是一直打 DB，如果你用 MongoDB Atlas 要注意連線數。
+
+### 回答你的問題：從外面下指令改變裡面狀態？
+
+有 3 種方式，都不用重啟：
+
+1.  **Sidecar localhost (推薦):** 上面那種，最安全。
+2.  **kubectl exec:** `kubectl exec -it <pod> -- curl http://127.0.0.1:9111/_internal/reload` 可以，但這是手動的。
+3.  **外部 Controller:** 在 k8s 外面跑一個服務監聽 MongoDB Change Stream，然後呼叫 `http://openresty-service/_internal/reload`。記得這個 endpoint 要加上 `X-Internal-Token` 校驗，不然會被外部打。
+
+> 重要區別：如果你要改的是 `upstream`、`ssl_certificate` 這種 nginx 指令，就躲不掉 `nginx -s reload`。但你說 config 是 json，那 100% 屬於業務邏輯，放 `shared_dict` 就對了。
+
+建議你用 **策略 A：watcher 只通知，OpenResty 自己去 config-api 抓**，這樣 OpenResty 不用裝 `lua-resty-mongol`，部署最乾淨，也最好做版本比對和 rollback。
+
+需要我幫你把 `config-api` + `openresty` + `watcher` 的完整 Dockerfile 和 lua 程式碼範本寫出來嗎？
