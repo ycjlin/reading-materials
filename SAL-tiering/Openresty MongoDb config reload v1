@@ -1,6 +1,6 @@
 problem: Openresty 被包在k8s pod 裡面，我們可以從外面下指令改變裡面的狀態，進而以事件觸發openresty 有所動作嗎？
 我不想重啟。我想用Mango DB來存config Map, 當D B的內容有所更動的時候，我想要事件觸發Openresty從D B裡面讀取最新的值，更新他的config map，不需要restart 重啟服務
-Config map is json; sidecar 用javascript實作
+Config map is json
 
 可以，而且這就是 OpenResty 在 k8s 裡的標準做法。核心觀念是：
 
