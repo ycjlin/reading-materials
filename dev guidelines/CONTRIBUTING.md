@@ -1,4 +1,4 @@
-# Engineering Git & Coding Workflow Standards
+# Git & Coding Workflow Standards
 
 ## 1. Purpose & Scope
 This document defines the standard Git workflow, naming conventions, and code quality practices for all software engineers. Consistent conventions improve readability, streamline code reviews, and enable seamless automation across Jira and our CI/CD pipelines.
